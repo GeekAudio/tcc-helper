@@ -3,9 +3,10 @@
 set -e
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-NAME="TCC Helper"
+NAME="TCC Helper"                 # 卷名（挂载后显示的名字，可以带空格）
+FILEBASE="TCC-Helper"             # 文件名用连字符：GitHub 上传资源时会把空格转成点
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist" 2>/dev/null || echo 1.0)"
-OUT="$ROOT/$NAME-$VERSION.dmg"
+OUT="$ROOT/$FILEBASE-$VERSION.dmg"
 
 echo "== 1) 构建 App =="
 sh "$ROOT/build.sh" | tail -3

@@ -6,7 +6,7 @@
 macOS **不再弹权限窗、也不在「隐私与安全性」里生成条目** ⇒ 麦克风、摄像头、系统音频采集、屏幕录制这类权限
 永远拿不到。这是唯一的手工补法。
 
-> **下载**：见 [Releases](../../releases) —— `TCC Helper-x.y.dmg`，挂载后把 App 拖进 Applications 即可。
+> **下载**：见 [Releases](../../releases) —— `TCC-Helper-x.y.dmg`，挂载后把 App 拖进 Applications 即可。
 > 也可以自己构建：`./build.sh`（App）/ `./make-dmg.sh`（DMG）。
 
 ![界面](screenshot.png)
@@ -17,7 +17,7 @@ macOS **不再弹权限窗、也不在「隐私与安全性」里生成条目** 
 
 ```sh
 ./build.sh          # 出 "TCC Helper.app"
-./make-dmg.sh       # 出 "TCC Helper-1.0.dmg"（拖进 Applications 就能装）
+./make-dmg.sh       # 出 "TCC-Helper-1.0.dmg"（拖进 Applications 就能装）
 ```
 
 只依赖 Xcode 命令行工具（`swiftc`），不需要 Xcode 工程文件。
@@ -149,5 +149,5 @@ TCC-Helper/
 ├── Resources/AppIcon.icns
 ├── bin/tcchelper-cli            # 构建产物
 ├── TCC Helper.app               # 构建产物
-└── TCC Helper-1.0.dmg           # 构建产物
+└── TCC-Helper-1.0.dmg           # 构建产物
 ```
