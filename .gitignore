@@ -1,0 +1,8 @@
+# 构建产物（走 Releases 分发，不进仓库）
+bin/
+*.app/
+*.dmg
+
+# macOS
+.DS_Store
+._*
