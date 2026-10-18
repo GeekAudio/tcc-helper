@@ -158,10 +158,10 @@ struct GrantButton: View {
                 let t = ctx.date.timeIntervalSinceReferenceDate
                     ZStack {
                         halo(t: t)
+                        sparkles(t: t)
                         scanArc(t: t)
                         progressRing
                         disc
-                        sparkles(t: t)
                         face(t: t)
                     }
                     .frame(width: 204, height: 204)
@@ -203,10 +203,10 @@ struct GrantButton: View {
     @ViewBuilder private func sparkles(t: TimeInterval) -> some View {
         if model.busy {
             SparkleField(t: t,
-                         count: model.stage == .applying ? 18 : 12,
-                         radius: 0.55...0.98,
+                         count: model.stage == .applying ? 20 : 14,
+                         radius: 0.62...0.96,
                          tint: .white)
-                .frame(width: 204, height: 204)
+                .frame(width: 300, height: 300)
                 .allowsHitTesting(false)
         }
     }
@@ -342,7 +342,9 @@ struct Dots: View {
 
 // MARK: - 星光
 
-/// 围着按钮飘的十字星点。用 Canvas 画，几十个粒子也不会掉帧。
+/// 绕着大按钮外围飘的小光点。
+/// 只画在按钮**外面**（半径下限已经大于按钮半径），每个点带一层黑色投影，
+/// 这样在浅色背景上也能看清，不会糊成一片白。
 struct SparkleField: View {
     let t: TimeInterval
     let count: Int
@@ -357,42 +359,38 @@ struct SparkleField: View {
             for i in 0..<count {
                 let seed = Double(i + 1)
 
-                // 用无理数做确定性伪随机，保证每帧参数一致
-                let a0 = frac(seed * 0.6180339887) * 2 * .pi
+                let a0 = Double(i) * 2.399963229728653   // 黄金角，分布更均匀
                 let r0 = radius.lowerBound
                     + (radius.upperBound - radius.lowerBound) * frac(seed * 0.7548776662)
-                let speed = 0.20 + 0.28 * frac(seed * 0.5698402910)
+                let speed = 0.10 + 0.16 * frac(seed * 0.5698402910)
                 let phase = frac(seed * 0.4142135623)
 
                 let cycle = (t * speed + phase).truncatingRemainder(dividingBy: 1)
-                let fade = sin(cycle * .pi)                       // 0 → 1 → 0
-                guard fade > 0.02 else { continue }
 
-                let drift = 16 * cycle                            // 慢慢上浮
+                // 呼吸：不彻底熄灭，最暗也留 30%
+                let breathe = 0.30 + 0.70 * (0.5 + 0.5 * sin(cycle * 2 * .pi))
+
                 let dir: Double = (i % 2 == 0) ? 1 : -1
-                let a = a0 + t * 0.10 * dir
+                let a = a0 + t * 0.045 * dir                    // 极慢绕圈
                 let r = maxR * r0
+                let lift = CGFloat(5 * sin(cycle * 2 * .pi))    // 轻微上下浮动
 
                 let x = c.x + CGFloat(cos(a) * r)
-                let y = c.y + CGFloat(sin(a) * r) - CGFloat(drift)
+                let y = c.y + CGFloat(sin(a) * r) + lift
 
-                let s = CGFloat(1.4 + 1.9 * frac(seed * 0.7320508075))
-                let op = 0.85 * fade
+                let s = CGFloat(1.0 + 1.3 * frac(seed * 0.7320508075))
+                let op = 0.98 * breathe
 
-                // 十字光芒
-                var p = Path()
-                p.move(to: CGPoint(x: x - s * 2.4, y: y))
-                p.addLine(to: CGPoint(x: x + s * 2.4, y: y))
-                p.move(to: CGPoint(x: x, y: y - s * 2.4))
-                p.addLine(to: CGPoint(x: x, y: y + s * 2.4))
-                ctx.stroke(p, with: .color(tint.opacity(op)), lineWidth: 1.0)
+                // 黑色投影：让白点在浅色背景上也有轮廓
+                let sh = CGRect(x: x - s * 1.6, y: y - s * 1.6 + 0.6,
+                                width: s * 3.2, height: s * 3.2)
+                ctx.fill(Path(ellipseIn: sh), with: .color(.black.opacity(0.12 * breathe)))
 
-                // 中心亮点
-                let dot = CGRect(x: x - s * 0.7, y: y - s * 0.7, width: s * 1.4, height: s * 1.4)
-                ctx.fill(Path(ellipseIn: dot), with: .color(.white.opacity(op)))
+                // 光点本体
+                let dot = CGRect(x: x - s, y: y - s, width: s * 2, height: s * 2)
+                ctx.fill(Path(ellipseIn: dot), with: .color(tint.opacity(op)))
             }
         }
-        .blendMode(.plusLighter)
     }
 }
 
