@@ -203,10 +203,10 @@ struct GrantButton: View {
     @ViewBuilder private func sparkles(t: TimeInterval) -> some View {
         if model.busy {
             SparkleField(t: t,
-                         count: model.stage == .applying ? 20 : 14,
-                         radius: 0.62...0.96,
+                         count: model.stage == .applying ? 46 : 32,
+                         radius: 0.55...0.82,
                          tint: .white)
-                .frame(width: 300, height: 300)
+                .frame(width: 340, height: 340)
                 .allowsHitTesting(false)
         }
     }
@@ -342,9 +342,9 @@ struct Dots: View {
 
 // MARK: - 星光
 
-/// 绕着大按钮外围飘的小光点。
-/// 只画在按钮**外面**（半径下限已经大于按钮半径），每个点带一层黑色投影，
-/// 这样在浅色背景上也能看清，不会糊成一片白。
+/// 绕着大按钮外围飘散的粒子场。
+/// 每个粒子有完整生命周期：从按钮边缘诞生 → 向外飘 + 绕圈 → 缩小淡出 → 重生，
+/// 带两层残影做拖尾，下面垫一层淡黑影，浅色背景上也能看清。
 struct SparkleField: View {
     let t: TimeInterval
     let count: Int
@@ -359,34 +359,48 @@ struct SparkleField: View {
             for i in 0..<count {
                 let seed = Double(i + 1)
 
-                let a0 = Double(i) * 2.399963229728653   // 黄金角，分布更均匀
-                let r0 = radius.lowerBound
-                    + (radius.upperBound - radius.lowerBound) * frac(seed * 0.7548776662)
-                let speed = 0.10 + 0.16 * frac(seed * 0.5698402910)
+                let a0 = Double(i) * 2.399963229728653          // 黄金角，铺得均匀
+                let speed = 0.13 + 0.24 * frac(seed * 0.5698402910)
                 let phase = frac(seed * 0.4142135623)
 
-                let cycle = (t * speed + phase).truncatingRemainder(dividingBy: 1)
+                let life = (t * speed + phase).truncatingRemainder(dividingBy: 1)
 
-                // 呼吸：不彻底熄灭，最暗也留 30%
-                let breathe = 0.30 + 0.70 * (0.5 + 0.5 * sin(cycle * 2 * .pi))
+                let r0 = radius.lowerBound
+                    + (radius.upperBound - radius.lowerBound) * frac(seed * 0.7548776662)
 
+                // 一边向外飘，一边绕着按钮转
+                let r = maxR * r0 + 26 * life
                 let dir: Double = (i % 2 == 0) ? 1 : -1
-                let a = a0 + t * 0.045 * dir                    // 极慢绕圈
-                let r = maxR * r0
-                let lift = CGFloat(5 * sin(cycle * 2 * .pi))    // 轻微上下浮动
+                let a = a0 + life * 0.85 * dir
 
                 let x = c.x + CGFloat(cos(a) * r)
-                let y = c.y + CGFloat(sin(a) * r) + lift
+                let y = c.y + CGFloat(sin(a) * r)
 
-                let s = CGFloat(1.0 + 1.3 * frac(seed * 0.7320508075))
-                let op = 0.98 * breathe
+                let fade = sin(life * .pi)                       // 诞生 → 最亮 → 消散
+                guard fade > 0.04 else { continue }
 
-                // 黑色投影：让白点在浅色背景上也有轮廓
-                let sh = CGRect(x: x - s * 1.6, y: y - s * 1.6 + 0.6,
-                                width: s * 3.2, height: s * 3.2)
-                ctx.fill(Path(ellipseIn: sh), with: .color(.black.opacity(0.12 * breathe)))
+                // 越飘越小
+                let base: Double = 1.5 + 1.7 * frac(seed * 0.7320508075)
+                let s = CGFloat(base * (1.0 - 0.45 * life))
+                let op = 0.95 * fade
 
-                // 光点本体
+                // 拖尾：沿运动反方向留两个残影
+                for k in 1...2 {
+                    let tr = r - Double(k) * 4.0
+                    let ta = a - 0.85 * dir * 0.05 * Double(k)
+                    let tx = c.x + CGFloat(cos(ta) * tr)
+                    let ty = c.y + CGFloat(sin(ta) * tr)
+                    let ts = s * (1.0 - 0.28 * Double(k))
+                    let rect = CGRect(x: tx - ts, y: ty - ts, width: ts * 2, height: ts * 2)
+                    ctx.fill(Path(ellipseIn: rect), with: .color(tint.opacity(op * 0.22)))
+                }
+
+                // 黑色投影：让白点在浅色背景上有轮廓
+                let sh = CGRect(x: x - s * 1.5, y: y - s * 1.5 + 0.5,
+                                width: s * 3, height: s * 3)
+                ctx.fill(Path(ellipseIn: sh), with: .color(.black.opacity(0.10 * fade)))
+
+                // 粒子本体
                 let dot = CGRect(x: x - s, y: y - s, width: s * 2, height: s * 2)
                 ctx.fill(Path(ellipseIn: dot), with: .color(tint.opacity(op)))
             }
