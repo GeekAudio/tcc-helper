@@ -158,7 +158,6 @@ struct GrantButton: View {
                 let t = ctx.date.timeIntervalSinceReferenceDate
                     ZStack {
                         halo(t: t)
-                        sparkles(t: t)
                         scanArc(t: t)
                         progressRing
                         disc
@@ -199,19 +198,6 @@ struct GrantButton: View {
             .blur(radius: 7)
     }
 
-    // 过程星光：只在扫描 / 写入时出现，围着按钮边缘慢慢飘
-    @ViewBuilder private func sparkles(t: TimeInterval) -> some View {
-        if model.busy {
-            SparkleField(t: t,
-                         count: model.stage == .applying ? 46 : 32,
-                         radius: 0.55...0.82,
-                         tint: model.stage == .applying
-                             ? Color(red: 0.25, green: 0.58, blue: 1.00)
-                             : Color(red: 0.12, green: 0.72, blue: 0.98))
-                .frame(width: 340, height: 340)
-                .allowsHitTesting(false)
-        }
-    }
 
     // 扫描阶段：一段绕圈的弧
     @ViewBuilder private func scanArc(t: TimeInterval) -> some View {
@@ -344,78 +330,6 @@ struct Dots: View {
 
 // MARK: - 星光
 
-/// 绕着大按钮外围飘散的粒子场（科技感）。
-/// 每个粒子：径向拖尾 + 三层光晕 + 高亮核心，少量带十字星芒。
-/// 不用拟物阴影，靠青色/紫色的对比在浅背景上立住。
-struct SparkleField: View {
-    let t: TimeInterval
-    let count: Int
-    let radius: ClosedRange<Double>
-    let tint: Color
-
-    var body: some View {
-        Canvas { ctx, size in
-            let c = CGPoint(x: size.width / 2, y: size.height / 2)
-            let maxR = Double(size.width) / 2
-
-            for i in 0..<count {
-                let seed = Double(i + 1)
-
-                let a0 = Double(i) * 2.399963229728653
-                let speed = 0.13 + 0.24 * frac(seed * 0.5698402910)
-                let phase = frac(seed * 0.4142135623)
-                let life = (t * speed + phase).truncatingRemainder(dividingBy: 1)
-
-                let r0 = radius.lowerBound
-                    + (radius.upperBound - radius.lowerBound) * frac(seed * 0.7548776662)
-
-                let r = maxR * r0 + 26 * life
-                let dir: Double = (i % 2 == 0) ? 1 : -1
-                let a = a0 + life * 0.85 * dir
-
-                let x = c.x + CGFloat(cos(a) * r)
-                let y = c.y + CGFloat(sin(a) * r)
-
-                let fade = sin(life * .pi)
-                guard fade > 0.05 else { continue }
-
-                let base: Double = 1.3 + 1.6 * frac(seed * 0.7320508075)
-                let s = CGFloat(base * (1.0 - 0.5 * life))
-
-                // 1) 径向拖尾：一条从身后收进来的细线
-                let tail: Double = 9 + 8 * frac(seed * 0.31)
-                let tx = x - CGFloat(cos(a) * tail)
-                let ty = y - CGFloat(sin(a) * tail)
-                var tp = Path()
-                tp.move(to: CGPoint(x: tx, y: ty))
-                tp.addLine(to: CGPoint(x: x, y: y))
-                ctx.stroke(tp, with: .color(tint.opacity(0.38 * fade)), lineWidth: max(0.5, s * 0.7))
-
-                // 2) 光晕：两层，越大越淡
-                let halo1 = CGRect(x: x - s * 3.6, y: y - s * 3.6, width: s * 7.2, height: s * 7.2)
-                ctx.fill(Path(ellipseIn: halo1), with: .color(tint.opacity(0.10 * fade)))
-                let halo2 = CGRect(x: x - s * 2.0, y: y - s * 2.0, width: s * 4.0, height: s * 4.0)
-                ctx.fill(Path(ellipseIn: halo2), with: .color(tint.opacity(0.26 * fade)))
-
-                // 3) 十字星芒：每 5 个粒子挑一个
-                if i % 5 == 0 {
-                    let arm = s * 3.2
-                    var sp = Path()
-                    sp.move(to: CGPoint(x: x - arm, y: y))
-                    sp.addLine(to: CGPoint(x: x + arm, y: y))
-                    sp.move(to: CGPoint(x: x, y: y - arm))
-                    sp.addLine(to: CGPoint(x: x, y: y + arm))
-                    ctx.stroke(sp, with: .color(tint.opacity(0.45 * fade)), lineWidth: 0.6)
-                }
-
-                // 4) 高亮核心
-                let core = CGRect(x: x - s * 0.85, y: y - s * 0.85,
-                                  width: s * 1.7, height: s * 1.7)
-                ctx.fill(Path(ellipseIn: core), with: .color(.white.opacity(1.0 * fade)))
-            }
-        }
-    }
-}
 
 // MARK: - 完成彩带
 
