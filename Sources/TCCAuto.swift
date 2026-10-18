@@ -16,14 +16,20 @@ struct AutoTarget: Identifiable {
     var bundleID: String
     var hasDR: Bool
     var dr: String
-    var services: [String]          // 由 Info.plist 推导
+    var services: [String]          // 由 Info.plist 推导（用户库）
+    var systemServices: [String] = []  // 由 Info.plist 推导（系统库）
     var source: String              // 从哪儿发现的
     var existing: Set<String> = []  // 用户库里已有「已允许」的服务
+    var systemExisting: Set<String> = []  // 系统库里已有「已允许」的服务
     var selected: Bool = true
 
     var displayName: String { ((path as NSString).lastPathComponent as NSString).deletingPathExtension }
-    /// 还缺哪些
+    /// 还缺哪些（用户库）
     var missing: [String] { services.filter { !existing.contains($0) } }
+    /// 还缺哪些（系统库）
+    var systemMissing: [String] { systemServices.filter { !systemExisting.contains($0) } }
+    /// 两个库加起来还有没有活干
+    var hasWork: Bool { !missing.isEmpty || !systemMissing.isEmpty }
 }
 
 enum AutoGrant {
@@ -64,6 +70,17 @@ enum AutoGrant {
         ("NSUserTrackingUsageDescription",            "kTCCServiceUserTracking"),
         ("NSSystemAdministrationUsageDescription",    "kTCCServiceSystemPolicySysAdminFiles"),
         ("NSAccessorySetupKitSupports",               "kTCCServiceAccessorySetup"),
+    ]
+
+    /// Info.plist 键 → **系统库**里的服务。
+    ///
+    /// ★ 这是旧版本最大的漏：macOS 15 起「系统音频录制」改走 ScreenCaptureKit，
+    ///   权限落在**系统库**的 `kTCCServiceScreenCapture`（和屏幕录制共用一条）；
+    ///   用户库那条 `kTCCServiceAudioCapture` 只服务旧 CoreAudio 接口。
+    ///   只写用户库 ⇒ 新接口仍然没权限，表现就是「明明授权了却用不了」。
+    ///   写系统库需要管理员密码，所以放在第二趟单独跑，一次提权批量写完。
+    static let systemUsageMap: [(key: String, service: String)] = [
+        ("NSAudioCaptureUsageDescription", "kTCCServiceScreenCapture"),
     ]
 
     // MARK: plist 读取
@@ -119,6 +136,19 @@ enum AutoGrant {
         for (key, service) in usageMap {
             guard info[key] != nil else { continue }
             // 只保留系统 tccd 真认识的服务名，避免写进去也是无效条目
+            guard known.isEmpty || known.contains(service) else { continue }
+            if !out.contains(service) { out.append(service) }
+        }
+        return out
+    }
+
+    /// 同一个 App 需要在**系统库**里补的服务
+    static func systemServices(forBundle bundle: String) -> [String] {
+        guard let info = plist(bundle + "/Contents/Info.plist") else { return [] }
+        let known = Set(ServiceCatalog.systemServices())
+        var out: [String] = []
+        for (key, service) in systemUsageMap {
+            guard info[key] != nil else { continue }
             guard known.isEmpty || known.contains(service) else { continue }
             if !out.contains(service) { out.append(service) }
         }
@@ -263,13 +293,16 @@ enum AutoGrant {
             guard !seen.contains(bundle) else { return }
             seen.insert(bundle)
             let svc = services(forBundle: bundle)
-            guard !svc.isEmpty else { return }
+            let sysSvc = systemServices(forBundle: bundle)
+            // 只要两个库里有一个有活干就收进来（旧版只看用户库，系统库服务整个被跳过）
+            guard !svc.isEmpty || !sysSvc.isEmpty else { return }
             guard let bid = bundleID(of: bundle), !bid.isEmpty else { return }
             // 签名信息先留空，真要写入时再用 enrich() 补
             // （扫描阶段对每个 App 跑 codesign 会让 36 个 App 花掉 17–21 秒）
             targets.append(AutoTarget(path: bundle, bundleID: bid,
                                       hasDR: false, dr: "",
-                                      services: svc, source: source))
+                                      services: svc, systemServices: sysSvc,
+                                      source: source))
         }
 
         for c in candidates {
@@ -278,10 +311,14 @@ enum AutoGrant {
                 consider(nested, "包内子组件（属于 \((c.path as NSString).lastPathComponent)）")
             }
         }
-        // 标出已经授权过的
-        let existing = existingGrants(db: .user)
+        // 标出已经授权过的 —— ★ 两个库都要查：
+        //   旧版只查用户库，于是系统库里的 Accessibility / ScreenCapture 永远被算成「缺失」，
+        //   每次点一键授权都在重复劳动，而且根本写不进去。
+        let existingUser = existingGrants(db: .user)
+        let existingSystem = existingGrants(db: .system)
         for i in targets.indices {
-            targets[i].existing = existing[targets[i].bundleID] ?? []
+            targets[i].existing = existingUser[targets[i].bundleID] ?? []
+            targets[i].systemExisting = existingSystem[targets[i].bundleID] ?? []
         }
         return targets.sorted { $0.bundleID < $1.bundleID }
     }
@@ -316,7 +353,9 @@ enum AutoGrant {
         var tmps: [String] = []
 
         for var t in items {
-            let svcList = t.services
+            // 系统库那趟只写 systemServices，用户库那趟只写 services ——
+            // 混着写会往库里塞无效条目（tccd 根本不看另一个库里的同名服务）。
+            let svcList = (db == .system) ? t.systemServices : t.services
             guard !svcList.isEmpty else { continue }
             if t.dr.isEmpty { enrich(&t) }   // 单个补（调用方通常已用 enrichAll 并行补过）
             var csreqPath: String? = nil
@@ -350,12 +389,19 @@ enum AutoGrant {
             return res
         }
 
-        if let bk = TCCCore.backup(db) { res.log.append("已备份 → \(bk)") }
-        else { res.log.append("⚠️ 备份失败（可能缺完全磁盘访问权限）") }
+        // ★ 系统库是 root:wheel，用户态 cp 必然失败 —— 备份放进提权脚本里做
+        if db == .system {
+            res.log.append("备份在提权脚本内完成")
+        } else if let bk = TCCCore.backup(db) {
+            res.log.append("已备份 → \(bk)")
+        } else {
+            res.log.append("⚠️ 备份失败（可能缺完全磁盘访问权限）")
+        }
 
         let r: ProcResult
         if needAdmin || db == .system {
-            r = Sh.runAsAdmin(script: "#!/bin/sh\n/usr/bin/sqlite3 \(TCCCore.shellQuote(db.path)) <<'TCCSQL'\n\(sql)\nTCCSQL\n/usr/bin/killall tccd 2>/dev/null\nexit 0\n")
+            // ★ 写完必须在同一个提权脚本里重启 tccd（kickstart，不是 killall）
+            r = Sh.runAsAdmin(script: "#!/bin/sh\n/bin/cp -p \(TCCCore.shellQuote(db.path)) \(TCCCore.shellQuote(db.path)).bak-$(date +%Y%m%dT%H%M%SZ) 2>/dev/null\n/usr/bin/sqlite3 \(TCCCore.shellQuote(db.path)) <<'TCCSQL'\n\(sql)\nTCCSQL\n\(TCCCore.kickstartCmd)\nexit 0\n")
         } else {
             r = Sh.run("/usr/bin/sqlite3", [db.path, sql])
         }
@@ -365,7 +411,10 @@ enum AutoGrant {
             res.log.append("✗ 写入失败：\(r.combined)")
             return res
         }
-        if !(needAdmin || db == .system) { _ = TCCCore.restartTCCD(needAdmin: false) }
+        // 提权脚本里已经 kickstart 过一次；这里再以**用户身份**补一次。
+        // 原因：用户域里 kickstart 是实测有效的路径（pid 438 → 3275），
+        // 而 root 在提权脚本里操作 gui/<uid> 域没实测过，双保险。
+        _ = TCCCore.restartTCCD(needAdmin: false)
         res.log.append("✓ 共写入 \(res.granted) 条")
         return res
     }

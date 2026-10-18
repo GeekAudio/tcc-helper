@@ -171,7 +171,8 @@ final class AdvancedModel: ObservableObject {
                     if (try? data.write(to: URL(fileURLWithPath: p))) != nil { csreqPath = p }
                 }
             }
-            let backedUp = TCCCore.backup(database) != nil
+            // ★ 系统库是 root:wheel，用户态 cp 必然失败 ⇒ 交给提权脚本自己备份
+            let backedUp = (database == .system) ? true : (TCCCore.backup(database) != nil)
 
             let sql = csreqPath != nil
                 ? TCCCore.grantSQL(service: svc, client: client, clientType: ct, csreqPath: csreqPath!)

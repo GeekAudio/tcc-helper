@@ -191,6 +191,24 @@ enum ServiceCatalog {
     static func name(for id: String) -> String {
         curated.first(where: { $0.id == id })?.name ?? ""
     }
+
+    /// 只存在于**系统库**的服务。
+    ///
+    /// ★ 写错库等于没写，而且是静默失败：用户库里出现一条 `kTCCServiceAccessibility`，
+    ///   查得到、看着像成功，tccd 却根本不看它。
+    ///   依据本机实测（2026-10-19）：系统库只有这四类 ——
+    ///   `Accessibility` / `ScreenCapture` / `SystemPolicyAllFiles` / `DeveloperTool`；
+    ///   而 `Microphone` / `AudioCapture` / `AppleEvents` / `BluetoothAlways` 都在用户库。
+    static let systemDBOnly: Set<String> = [
+        "kTCCServiceAccessibility",
+        "kTCCServiceScreenCapture",
+        "kTCCServiceSystemPolicyAllFiles",
+        "kTCCServiceDeveloperTool",
+    ]
+
+    static func db(for service: String) -> TCCDB {
+        systemDBOnly.contains(service) ? .system : .user
+    }
 }
 
 // MARK: - 核心操作
@@ -415,24 +433,50 @@ enum TCCCore {
     }
 
     /// 写入（授权 / 撤销）。系统库自动走管理员。
+    ///
+    /// ★ 写系统库时**必须在同一个提权脚本里**做两件事：
+    ///   1) 备份 —— 系统库是 root:wheel，用户态 `cp` 必然失败，旧版只会在界面上
+    ///      报一句「备份失败」然后照样写，等于没有回滚点；
+    ///   2) 重启 tccd —— 否则写进去的值会被旧缓存覆盖回去（实测 Accessibility 写成 2，
+    ///      下次查又变回 0），而且用户看不到任何报错。
     static func apply(sql: String, db: TCCDB, needAdmin: Bool) -> ProcResult {
         if needAdmin || db == .system {
             let script = """
             #!/bin/sh
+            /bin/cp -p \(shellQuote(db.path)) \(shellQuote(db.path)).bak-$(date +%Y%m%dT%H%M%SZ) 2>/dev/null
             /usr/bin/sqlite3 \(shellQuote(db.path)) <<'TCCSQL'
             \(sql)
             TCCSQL
+            \(kickstartCmd)
+            exit 0
             """
             return Sh.runAsAdmin(script: script)
         }
         return Sh.run("/usr/bin/sqlite3", [db.path, sql])
     }
 
+    /// 让 tccd 丢掉内存缓存、重新读库。
+    ///
+    /// ★★ 绝不能用 `killall tccd`：实测（2026-10-19）`kill -TERM <tccd pid>` 返回 0，
+    ///    但 tccd 的 pid **根本不变** —— 信号被忽略，等于没重启。于是出现最坑的症状：
+    ///    库里写进去了、`sqlite3` 查出来是 2，可用起来还是没权限，因为 tccd 仍在用旧缓存。
+    ///    必须用 `launchctl kickstart -k`，实测 pid 会真的换（438 → 3275）。
     static func restartTCCD(needAdmin: Bool) -> ProcResult {
+        let uid = getuid()
         if needAdmin {
-            return Sh.runAsAdmin(script: "#!/bin/sh\n/usr/bin/killall tccd 2>/dev/null; exit 0\n")
+            return Sh.runAsAdmin(script: """
+            #!/bin/sh
+            \(kickstartCmd)
+            exit 0
+            """)
         }
-        return Sh.run("/usr/bin/killall", ["tccd"])
+        return Sh.run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/com.apple.tccd"])
+    }
+
+    /// 重启 tccd 的 shell 片段（kickstart 为主，killall 兜底）
+    static var kickstartCmd: String {
+        "/bin/launchctl kickstart -k gui/\(getuid())/com.apple.tccd 2>/dev/null; "
+            + "/usr/bin/killall tccd 2>/dev/null; true"
     }
 
     static func shellQuote(_ s: String) -> String {
