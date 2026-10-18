@@ -205,7 +205,9 @@ struct GrantButton: View {
             SparkleField(t: t,
                          count: model.stage == .applying ? 46 : 32,
                          radius: 0.55...0.82,
-                         tint: .white)
+                         tint: model.stage == .applying
+                             ? Color(red: 0.25, green: 0.58, blue: 1.00)
+                             : Color(red: 0.12, green: 0.72, blue: 0.98))
                 .frame(width: 340, height: 340)
                 .allowsHitTesting(false)
         }
@@ -342,9 +344,9 @@ struct Dots: View {
 
 // MARK: - 星光
 
-/// 绕着大按钮外围飘散的粒子场。
-/// 每个粒子有完整生命周期：从按钮边缘诞生 → 向外飘 + 绕圈 → 缩小淡出 → 重生，
-/// 带两层残影做拖尾，下面垫一层淡黑影，浅色背景上也能看清。
+/// 绕着大按钮外围飘散的粒子场（科技感）。
+/// 每个粒子：径向拖尾 + 三层光晕 + 高亮核心，少量带十字星芒。
+/// 不用拟物阴影，靠青色/紫色的对比在浅背景上立住。
 struct SparkleField: View {
     let t: TimeInterval
     let count: Int
@@ -359,16 +361,14 @@ struct SparkleField: View {
             for i in 0..<count {
                 let seed = Double(i + 1)
 
-                let a0 = Double(i) * 2.399963229728653          // 黄金角，铺得均匀
+                let a0 = Double(i) * 2.399963229728653
                 let speed = 0.13 + 0.24 * frac(seed * 0.5698402910)
                 let phase = frac(seed * 0.4142135623)
-
                 let life = (t * speed + phase).truncatingRemainder(dividingBy: 1)
 
                 let r0 = radius.lowerBound
                     + (radius.upperBound - radius.lowerBound) * frac(seed * 0.7548776662)
 
-                // 一边向外飘，一边绕着按钮转
                 let r = maxR * r0 + 26 * life
                 let dir: Double = (i % 2 == 0) ? 1 : -1
                 let a = a0 + life * 0.85 * dir
@@ -376,33 +376,42 @@ struct SparkleField: View {
                 let x = c.x + CGFloat(cos(a) * r)
                 let y = c.y + CGFloat(sin(a) * r)
 
-                let fade = sin(life * .pi)                       // 诞生 → 最亮 → 消散
-                guard fade > 0.04 else { continue }
+                let fade = sin(life * .pi)
+                guard fade > 0.05 else { continue }
 
-                // 越飘越小
-                let base: Double = 1.5 + 1.7 * frac(seed * 0.7320508075)
-                let s = CGFloat(base * (1.0 - 0.45 * life))
-                let op = 0.95 * fade
+                let base: Double = 1.3 + 1.6 * frac(seed * 0.7320508075)
+                let s = CGFloat(base * (1.0 - 0.5 * life))
 
-                // 拖尾：沿运动反方向留两个残影
-                for k in 1...2 {
-                    let tr = r - Double(k) * 4.0
-                    let ta = a - 0.85 * dir * 0.05 * Double(k)
-                    let tx = c.x + CGFloat(cos(ta) * tr)
-                    let ty = c.y + CGFloat(sin(ta) * tr)
-                    let ts = s * (1.0 - 0.28 * Double(k))
-                    let rect = CGRect(x: tx - ts, y: ty - ts, width: ts * 2, height: ts * 2)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(tint.opacity(op * 0.22)))
+                // 1) 径向拖尾：一条从身后收进来的细线
+                let tail: Double = 9 + 8 * frac(seed * 0.31)
+                let tx = x - CGFloat(cos(a) * tail)
+                let ty = y - CGFloat(sin(a) * tail)
+                var tp = Path()
+                tp.move(to: CGPoint(x: tx, y: ty))
+                tp.addLine(to: CGPoint(x: x, y: y))
+                ctx.stroke(tp, with: .color(tint.opacity(0.38 * fade)), lineWidth: max(0.5, s * 0.7))
+
+                // 2) 光晕：两层，越大越淡
+                let halo1 = CGRect(x: x - s * 3.6, y: y - s * 3.6, width: s * 7.2, height: s * 7.2)
+                ctx.fill(Path(ellipseIn: halo1), with: .color(tint.opacity(0.10 * fade)))
+                let halo2 = CGRect(x: x - s * 2.0, y: y - s * 2.0, width: s * 4.0, height: s * 4.0)
+                ctx.fill(Path(ellipseIn: halo2), with: .color(tint.opacity(0.26 * fade)))
+
+                // 3) 十字星芒：每 5 个粒子挑一个
+                if i % 5 == 0 {
+                    let arm = s * 3.2
+                    var sp = Path()
+                    sp.move(to: CGPoint(x: x - arm, y: y))
+                    sp.addLine(to: CGPoint(x: x + arm, y: y))
+                    sp.move(to: CGPoint(x: x, y: y - arm))
+                    sp.addLine(to: CGPoint(x: x, y: y + arm))
+                    ctx.stroke(sp, with: .color(tint.opacity(0.45 * fade)), lineWidth: 0.6)
                 }
 
-                // 黑色投影：让白点在浅色背景上有轮廓
-                let sh = CGRect(x: x - s * 1.5, y: y - s * 1.5 + 0.5,
-                                width: s * 3, height: s * 3)
-                ctx.fill(Path(ellipseIn: sh), with: .color(.black.opacity(0.10 * fade)))
-
-                // 粒子本体
-                let dot = CGRect(x: x - s, y: y - s, width: s * 2, height: s * 2)
-                ctx.fill(Path(ellipseIn: dot), with: .color(tint.opacity(op)))
+                // 4) 高亮核心
+                let core = CGRect(x: x - s * 0.85, y: y - s * 0.85,
+                                  width: s * 1.7, height: s * 1.7)
+                ctx.fill(Path(ellipseIn: core), with: .color(.white.opacity(1.0 * fade)))
             }
         }
     }
