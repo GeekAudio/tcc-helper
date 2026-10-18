@@ -23,7 +23,9 @@ swiftc \
   -o "$APP/Contents/MacOS/$BIN" \
   "$ROOT/Sources/TCCCore.swift" \
   "$ROOT/Sources/TCCAuto.swift" \
-  "$ROOT/Sources/TCCHelperApp.swift"
+  "$ROOT/Sources/L10n.swift" \
+  "$ROOT/Sources/TCCHelperApp.swift" \
+  "$ROOT/Sources/AdvancedView.swift"
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 

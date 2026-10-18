@@ -1,624 +1,480 @@
-// TCC Helper —— 万能权限工具（GUI）
+// TCC Helper —— 主界面
 //
-// 用途：把「已授权」条目直接写进 macOS 的 TCC 数据库，绕过权限弹窗。
-//       AMFI 被关闭的机器上系统不再弹窗、也不生成条目，这是唯一的手工补法。
-//
-// ★ 本 App 自身需要「完全磁盘访问权限」才能读写 TCC.db。
+// 设计原则：
+//   · 默认只有一个按钮。点一下：扫描 → 写入 → 完成，全过程有动画。
+//   · 所有手动能力收进「高级模式」，主界面不出现。
+//   · 不写日志。每一步的结果直接体现在按钮和状态行上。
+//   · 文案全部走 L10n，界面不会中英混排。
 
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
-// MARK: - 日志
+// MARK: - 主流程
 
-final class Log: ObservableObject {
-    @Published var text = ""
-    private let file = "/tmp/tcchelper.log"
+enum GrantStage: Equatable {
+    case idle
+    case scanning
+    case applying
+    case done(apps: Int, granted: Int)
+    case nothing
+    case failed(String)
+}
 
-    init() {
-        try? "".write(toFile: file, atomically: true, encoding: .utf8)
+@MainActor
+final class GrantModel: ObservableObject {
+    @Published var stage: GrantStage = .idle
+    @Published var progress: Double = 0
+    @Published var pendingApps = 0
+    @Published var pendingMissing = 0
+
+    private var ticker: Timer?
+
+    var busy: Bool {
+        switch stage {
+        case .scanning, .applying: return true
+        default: return false
+        }
     }
 
-    func add(_ s: String) {
-        let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(ts)] \(s)"
-        text += line + "\n"
-        if let h = FileHandle(forWritingAtPath: file) {
-            h.seekToEndOfFile()
-            h.write(Data((line + "\n").utf8))
-            try? h.close()
+    func run() {
+        guard !busy else { return }
+        stage = .scanning
+        progress = 0
+        pendingApps = 0
+        pendingMissing = 0
+        startTicker()
+
+        Task { [weak self] in
+            let found = await Task.detached(priority: .userInitiated) {
+                AutoGrant.scan(roots: ["/Applications"],
+                               includeLaunchd: true,
+                               includeRunning: true,
+                               includeHelpers: true)
+            }.value
+
+            guard let self else { return }
+            let todo = found.filter { !$0.missing.isEmpty }
+            self.pendingApps = todo.count
+            self.pendingMissing = todo.reduce(0) { $0 + $1.missing.count }
+
+            if todo.isEmpty {
+                self.finish(.nothing)
+                return
+            }
+
+            self.stage = .applying
+            self.progress = 0.08
+
+            let enriched = await Task.detached(priority: .userInitiated) {
+                AutoGrant.enrichAll(todo)
+            }.value
+
+            let res = await Task.detached(priority: .userInitiated) {
+                AutoGrant.applyBatch(enriched, db: .user)
+            }.value
+
+            if res.granted == 0 && res.failed > 0 {
+                self.finish(.failed(res.log.last ?? ""))
+            } else {
+                self.finish(.done(apps: todo.count, granted: res.granted))
+            }
         }
+    }
+
+    func reset() {
+        guard !busy else { return }
+        stage = .idle
+        progress = 0
+    }
+
+    private func finish(_ s: GrantStage) {
+        ticker?.invalidate()
+        ticker = nil
+        withAnimation(.easeOut(duration: 0.4)) { progress = 1 }
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.72)) { stage = s }
+    }
+
+    private func startTicker() {
+        ticker?.invalidate()
+        ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.stage == .applying else { return }
+                if self.progress < 0.9 {
+                    self.progress += (0.92 - self.progress) * 0.055
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 大按钮
+
+struct GrantButton: View {
+    @ObservedObject var model: GrantModel
+    @EnvironmentObject var lang: LangStore
+    @State private var hover = false
+
+    private var palette: [Color] {
+        switch model.stage {
+        case .done, .nothing:
+            return [Color(red: 0.24, green: 0.76, blue: 0.50), Color(red: 0.09, green: 0.60, blue: 0.44)]
+        case .failed:
+            return [Color(red: 0.94, green: 0.40, blue: 0.36), Color(red: 0.78, green: 0.22, blue: 0.26)]
+        default:
+            return [Color(red: 0.36, green: 0.51, blue: 0.99), Color(red: 0.56, green: 0.34, blue: 0.95)]
+        }
+    }
+
+    var body: some View {
+        Button {
+            model.run()
+        } label: {
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !model.busy)) { ctx in
+                let t = ctx.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    halo(t: t)
+                    scanArc(t: t)
+                    progressRing
+                    disc
+                    face(t: t)
+                }
+                .frame(width: 204, height: 204)
+            }
+        }
+        .buttonStyle(PressScaleStyle())
+        .onHover { hover = $0 }
+        .scaleEffect(hover && !model.busy ? 1.02 : 1.0)
+        .animation(.easeOut(duration: 0.22), value: hover)
+    }
+
+    // 呼吸光晕
+    private func halo(t: TimeInterval) -> some View {
+        let amp = model.busy ? 0.055 : 0.018
+        let speed = model.busy ? 2.0 : 0.9
+        return Circle()
+            .fill(
+                RadialGradient(colors: [palette[0].opacity(0.50), palette[0].opacity(0)],
+                               center: .center, startRadius: 26, endRadius: 84)
+            )
+            .scaleEffect(1 + amp * sin(t * speed))
+            .blur(radius: 7)
+    }
+
+    // 扫描阶段：一段绕圈的弧
+    @ViewBuilder private func scanArc(t: TimeInterval) -> some View {
+        if case .scanning = model.stage {
+            let cycle = t.truncatingRemainder(dividingBy: 1.3) / 1.3
+            Circle()
+                .trim(from: 0, to: 0.24)
+                .stroke(
+                    AngularGradient(gradient: Gradient(colors: [palette[0].opacity(0), palette[0], palette[1].opacity(0.9)]),
+                                    center: .center),
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                )
+                .rotationEffect(.degrees(cycle * 360))
+                .padding(-13)
+                .frame(width: 180, height: 180)
+        }
+    }
+
+    // 写入阶段：确定进度环
+    @ViewBuilder private var progressRing: some View {
+        if case .applying = model.stage {
+            ZStack {
+                Circle()
+                    .stroke(Color.primary.opacity(0.09), lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: model.progress)
+                    .stroke(
+                        AngularGradient(gradient: Gradient(colors: [palette[0], palette[1]]), center: .center),
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.22), value: model.progress)
+            }
+            .padding(-13)
+            .frame(width: 180, height: 180)
+        }
+    }
+
+    private var disc: some View {
+        Circle()
+            .fill(LinearGradient(colors: palette, startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay(
+                Circle().stroke(
+                    LinearGradient(colors: [Color.white.opacity(0.35), Color.white.opacity(0.02)],
+                                   startPoint: .top, endPoint: .bottom),
+                    lineWidth: 1
+                )
+            )
+            .shadow(color: palette[0].opacity(hover ? 0.45 : 0.32), radius: hover ? 28 : 20, y: 12)
+            .frame(width: 156, height: 156)
+            .animation(.easeOut(duration: 0.25), value: hover)
+    }
+
+    @ViewBuilder private func face(t: TimeInterval) -> some View {
+        VStack(spacing: 7) {
+            switch model.stage {
+            case .idle:
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.system(size: 29, weight: .regular))
+                Text(lang.t("grantAll"))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+            case .scanning:
+                Image(systemName: "viewfinder")
+                    .font(.system(size: 28, weight: .medium))
+                Text(lang.t("scanning"))
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                Dots(t: t)
+            case .applying:
+                HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    Text("\(Int(model.progress * 100))")
+                        .font(.system(size: 36, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text("%").font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .opacity(0.75)
+                }
+                Text(lang.t("writing"))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .opacity(0.85)
+            case .done(_, let granted):
+                Image(systemName: "checkmark")
+                    .font(.system(size: 38, weight: .bold))
+                    .transition(.scale(scale: 0.4).combined(with: .opacity))
+                Text(lang.f("doneShort", granted))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .opacity(0.92)
+            case .nothing:
+                Image(systemName: "checkmark")
+                    .font(.system(size: 38, weight: .bold))
+                Text(lang.t("nothingShort"))
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .opacity(0.92)
+            case .failed:
+                Image(systemName: "exclamationmark")
+                    .font(.system(size: 42, weight: .bold))
+                Text(lang.t("retry"))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .opacity(0.92)
+            }
+        }
+        .foregroundStyle(.white)
+    }
+}
+
+struct Dots: View {
+    let t: TimeInterval
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { i in
+                let v = sin(t * 4.2 - Double(i) * 0.8)
+                Circle()
+                    .fill(Color.white.opacity(0.30 + 0.60 * max(0, v)))
+                    .frame(width: 4, height: 4)
+            }
+        }
+    }
+}
+
+struct PressScaleStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.955 : 1.0)
+            .animation(.spring(response: 0.26, dampingFraction: 0.62), value: configuration.isPressed)
     }
 }
 
 // MARK: - 主界面
 
-struct ContentView: View {
-    @StateObject private var log = Log()
-
-    @State private var app = AppInfo()
-    @State private var dropTargeted = false
-
-    @State private var db: TCCDB = .user
-    @State private var service = "kTCCServiceMicrophone"
-    @State private var svcFilter = ""
-    @State private var forcePathMode = false
-
-    @State private var entries: [TCCCore.Entry] = []
-    @State private var dbStatus: [TCCDB: TCCCore.DBState] = [:]
-    @State private var busy = false
-
-    // 自动授权
-    @State private var autoTargets: [AutoTarget] = []
-    @State private var autoScanApps = true
-    @State private var autoScanLaunchd = true
-    @State private var autoScanRunning = true
-    @State private var scanning = false
-
-    private var services: [(id: String, name: String)] {
-        let all = ServiceCatalog.all()
-        guard !svcFilter.isEmpty else { return all }
-        let f = svcFilter.lowercased()
-        return all.filter { $0.id.lowercased().contains(f) || $0.name.lowercased().contains(f) }
-    }
-
-    private var clientValue: String {
-        if !forcePathMode && !app.bundleID.isEmpty { return app.bundleID }
-        return app.path
-    }
-    private var clientType: Int {
-        (!forcePathMode && !app.bundleID.isEmpty) ? 0 : 1
-    }
+struct RootView: View {
+    @StateObject private var lang = LangStore()
+    @StateObject private var model = GrantModel()
+    @State private var showAdvanced = false
+    @State private var showLang = false
 
     var body: some View {
-        HSplitView {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    header
-                    dbSection
-                    autoSection
-                    appSection
-                    serviceSection
-                    actionSection
-                    entriesSection
-                }
-                .padding(16)
+        ZStack {
+            Backdrop()
+            VStack(spacing: 0) {
+                header
+                    .padding(.top, 28)
+                Spacer(minLength: 6)
+                GrantButton(model: model)
+                statusLine
+                    .padding(.top, 12)
+                Spacer(minLength: 6)
+                footer
+                    .padding(.bottom, 16)
             }
-            .frame(minWidth: 460)
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("日志").font(.system(size: 13, weight: .medium))
-                    Spacer()
-                    Button("清空") { log.text = "" }.controlSize(.small)
-                    Button("复制") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(log.text, forType: .string)
-                    }.controlSize(.small)
-                }
-                ScrollView {
-                    Text(log.text.isEmpty ? "（暂无输出）" : log.text)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            .padding(16)
-            .frame(minWidth: 340)
+            .frame(width: 372, height: 500)
         }
-        .frame(minWidth: 940, minHeight: 780)
-        .onAppear(perform: startup)
+        .frame(width: 372, height: 500)
+        .environmentObject(lang)
+        .sheet(isPresented: $showAdvanced) {
+            AdvancedView().environmentObject(lang)
+        }
     }
-
-    // MARK: 区块
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("TCC Helper").font(.system(size: 20, weight: .semibold))
-            Text("把「已授权」条目直接写进 TCC 数据库，绕过权限弹窗。"
-                 + "AMFI 被关闭的机器上系统不再弹窗、也不生成条目，这是唯一的手工补法。")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        VStack(spacing: 9) {
+            Text("TCC HELPER")
+                .font(.system(size: 10, weight: .bold))
+                .tracking(2.4)
+                .foregroundStyle(.tertiary)
+
+            Text(lang.t("tagline"))
+                .font(.system(size: lang.lang == .zh ? 22 : 18.5, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text(lang.t("lead"))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 32)
         }
     }
 
-    private var dbSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("", selection: $db) {
-                    ForEach(TCCDB.allCases) { d in
-                        Text("\(d.title) — \(d.hint)").tag(d)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-                .labelsHidden()
-
-                HStack(spacing: 8) {
-                    let st = dbStatus[db]
-                    let usable = (st?.readable ?? false) && ((st?.writable ?? false) || db == .system)
-                    Image(systemName: usable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(usable ? .green : .orange)
-                    Text(st?.detail ?? "未检查").font(.system(size: 11)).textSelection(.enabled)
-                }
-                HStack {
-                    Button("重新自检") { selfCheck() }.controlSize(.small)
-                    Button("给自己完全磁盘访问") { selfFDA() }.controlSize(.small)
-                    Button("打开隐私设置") {
-                        if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                            NSWorkspace.shared.open(u)
-                        }
-                    }.controlSize(.small)
-                }
-                Text("系统库属主是 root ⇒ 写它时会弹管理员密码（不是「完全磁盘访问」那个）。"
-                     + "用户库若不可写，才需要给本 App 勾上「完全磁盘访问权限」。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+    @ViewBuilder private var statusLine: some View {
+        VStack(spacing: 3) {
+            switch model.stage {
+            case .idle:
+                Text(lang.t("ready"))
+                    .font(.system(size: 12, weight: .medium))
+                Text(lang.t("readyHint"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            case .scanning:
+                Text(lang.t("scanningHint"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            case .applying:
+                Text(lang.f("foundHint", model.pendingApps, model.pendingMissing))
+                    .font(.system(size: 12, weight: .medium))
+                Text(lang.t("applyingHint"))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
                     .fixedSize(horizontal: false, vertical: true)
+            case .done(let apps, let granted):
+                Text(lang.f("doneHint", apps, granted))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color(red: 0.10, green: 0.55, blue: 0.38))
+            case .nothing:
+                Text(lang.t("allGoodHint"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            case .failed:
+                Text(lang.t("failedHint"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
             }
-            .padding(6)
-        } label: { Text("1 · 目标数据库").font(.system(size: 12, weight: .medium)) }
+        }
+        .animation(.easeInOut(duration: 0.2), value: model.stage)
     }
 
-    private var appSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
-                        .foregroundStyle(dropTargeted ? Color.accentColor : Color.secondary.opacity(0.5))
-                    VStack(spacing: 4) {
-                        Image(systemName: "square.and.arrow.down")
-                            .font(.system(size: 20)).foregroundStyle(.secondary)
-                        Text("把 .app 拖到这里（也可拖包内的子组件）")
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
+    private var footer: some View {
+        HStack {
+            Button {
+                showAdvanced = true
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 11))
+                    Text(lang.t("advanced"))
+                        .font(.system(size: 11.5))
                 }
-                .frame(height: 84)
-                .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
-                    guard let p = providers.first else { return false }
-                    p.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                        var path: String?
-                        if let d = item as? Data {
-                            path = URL(dataRepresentation: d, relativeTo: nil)?.path
-                        } else if let u = item as? URL {
-                            path = u.path
-                        }
-                        if let path { DispatchQueue.main.async { setApp(path) } }
-                    }
-                    return true
-                }
-
-                HStack {
-                    Button("选择目标…") { pickApp() }
-                    Button("从运行中的 App 选…") { pickRunning() }
-                    if !app.path.isEmpty {
-                        Button("清空") { app = AppInfo(); entries = [] }
-                    }
-                }
-
-                if !app.path.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        labeled("路径", app.path)
-                        labeled("Bundle ID", app.bundleID.isEmpty ? "（无）" : app.bundleID)
-                        if !app.version.isEmpty { labeled("版本", app.version) }
-                        labeled("签名", app.hasDR ? "有显式 designated requirement"
-                                                  : "无显式 DR（csreq 将留空）")
-                        if !app.team.isEmpty { labeled("签发者", app.team) }
-                        if !app.note.isEmpty {
-                            Text("⚠️ " + app.note).font(.system(size: 11)).foregroundStyle(.orange)
-                        }
-                        Toggle("按路径授权（client_type=1，而不是 Bundle ID）", isOn: $forcePathMode)
-                            .font(.system(size: 11))
-                            .disabled(app.path.isEmpty)
-                    }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.secondary.opacity(0.07))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
-            .padding(6)
-        } label: { Text("3 · 目标 App（手动）").font(.system(size: 12, weight: .medium)) }
+            .buttonStyle(.plain)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+
+            Spacer()
+
+            languageMenu
+        }
+        .padding(.horizontal, 22)
     }
 
-    private var serviceSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("筛选服务（中英文都行）", text: $svcFilter)
-                        .textFieldStyle(.roundedBorder)
-                }
-                Picker("服务", selection: $service) {
-                    ForEach(services, id: \.id) { s in
-                        Text(s.name.isEmpty ? s.id : "\(s.name) — \(s.id)").tag(s.id)
-                    }
-                }
-                .labelsHidden()
-                HStack {
-                    Text("当前：").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Text(service).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                }
-                Text("服务清单是运行时从系统 tccd 里抽出来的，所以「万能」——系统认的它都在。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+    private var languageMenu: some View {
+        Button {
+            showLang = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "globe")
+                    .font(.system(size: 10))
+                Text(lang.choiceLabel(lang.choice))
+                    .font(.system(size: 10.5))
             }
-            .padding(6)
-        } label: { Text("4 · 权限服务（手动）").font(.system(size: 12, weight: .medium)) }
-    }
-
-    private var actionSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Button("预演（不写库）") { doDryRun() }
-                        .disabled(busy || app.path.isEmpty)
-                    Button("授权") { doGrant() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(busy || app.path.isEmpty)
-                    Button("撤销") { doRevoke() }
-                        .disabled(busy || app.path.isEmpty)
-                    Button("刷新条目") { refresh() }
-                        .disabled(busy || app.path.isEmpty)
-                }
-                if busy { ProgressView().controlSize(.small) }
-                Text("写入前会自动备份 TCC.db；写完后自动 killall tccd 让系统重新读库。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            .padding(6)
-        } label: { Text("5 · 操作").font(.system(size: 12, weight: .medium)) }
-    }
-
-    private var autoSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("不用人工选：App 的 Info.plist 里已经声明了它要什么权限，顺着这个反推。"
-                     + "还会扫 launchd 注册的后台组件 —— 真正申请权限的往往是 helper"
-                     + "（例：Loopback 的麦克风/系统音频其实属于包内的 ARK.app，给 Loopback 授权没用）。")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 12) {
-                    Toggle("/Applications", isOn: $autoScanApps).font(.system(size: 11))
-                    Toggle("launchd 后台组件", isOn: $autoScanLaunchd).font(.system(size: 11))
-                    Toggle("运行中的 App", isOn: $autoScanRunning).font(.system(size: 11))
-                    Spacer()
-                    if scanning { ProgressView().controlSize(.small) }
-                    Button(scanning ? "扫描中…" : "扫描") { runAutoScan() }
-                        .disabled(busy || scanning)
-                }
-
-                if !autoTargets.isEmpty {
-                    let picked = autoTargets.filter { $0.selected }.count
-                    HStack(spacing: 8) {
-                        Text("\(autoTargets.count) 个 App 声明了权限，选中 \(picked) 个")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("全选") { setAllSelected(true) }.controlSize(.small)
-                        Button("全不选") { setAllSelected(false) }.controlSize(.small)
-                        Button("只选还缺的") { onlyMissing() }.controlSize(.small)
-                    }
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 3) {
-                            ForEach($autoTargets) { $t in
-                                HStack(spacing: 6) {
-                                    Toggle("", isOn: $t.selected).labelsHidden().controlSize(.mini)
-                                    Text(t.displayName)
-                                        .font(.system(size: 11))
-                                        .frame(width: 150, alignment: .leading).lineLimit(1)
-                                    Text(t.bundleID)
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundStyle(.secondary).lineLimit(1)
-                                    Spacer()
-                                    Text(t.missing.isEmpty ? "已全授权" : "缺 \(t.missing.count)")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(t.missing.isEmpty ? .green : .orange)
-                                }
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showLang, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(LangStore.Choice.allCases, id: \.self) { c in
+                    Button {
+                        lang.choice = c
+                        showLang = false
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(lang.choiceLabel(c))
+                                .font(.system(size: 11.5))
+                            Spacer(minLength: 14)
+                            if lang.choice == c {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9, weight: .bold))
                             }
                         }
-                        .padding(6)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .contentShape(Rectangle())
                     }
-                    .frame(height: 170)
-                    .background(Color.secondary.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                    HStack {
-                        Button("授权选中的") { runAutoApply() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(busy)
-                        Text("一次事务写完，只备份一次、只重启一次 tccd。")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
+                    .buttonStyle(.plain)
                 }
             }
             .padding(6)
-        } label: { Text("2 · 自动授权（推荐）").font(.system(size: 12, weight: .medium)) }
-    }
-
-    private var entriesSection: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 6) {
-                if entries.isEmpty {
-                    Text(app.path.isEmpty ? "先选一个目标 App。" : "该 App 在\(db.title)里没有任何条目。")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                } else {
-                    ForEach(entries) { e in
-                        HStack(spacing: 6) {
-                            Text(e.stateText)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(e.authValue == 2 ? .green : (e.authValue == 0 ? .red : .orange))
-                                .frame(width: 48, alignment: .leading)
-                            Text(ServiceCatalog.name(for: e.service).isEmpty
-                                 ? e.service : "\(ServiceCatalog.name(for: e.service))")
-                                .font(.system(size: 11))
-                                .frame(width: 110, alignment: .leading)
-                            Text(e.service).font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Text("csreq \(e.csreqLen)B · ct=\(e.clientType)").font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            .padding(6)
-        } label: { Text("6 · 当前条目（\(db.title)）").font(.system(size: 12, weight: .medium)) }
-    }
-
-    private func labeled(_ k: String, _ v: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text(k).font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 74, alignment: .leading)
-            Text(v).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 132)
         }
     }
+}
 
-    // MARK: 动作
-
-    private func startup() {
-        log.add("TCC Helper 启动；TCC 库路径 = \(db.path)")
-        selfCheck()
-        let n = ServiceCatalog.systemServices().count
-        log.add("从 tccd 抽到 \(n) 个服务名")
-        runAutoScan(quiet: true)   // 打开就先告诉你缺什么
-    }
-
-    private func selfCheck() {
-        for d in TCCDB.allCases {
-            let r = TCCCore.checkDB(d)
-            dbStatus[d] = r
-            log.add("自检 \(d.title)：\(r.readable ? "可读" : "不可读") / "
-                    + "\(r.writable ? "可写" : "不可写") — \(r.detail)")
+struct Backdrop: View {
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+            RadialGradient(
+                colors: [Color(red: 0.42, green: 0.50, blue: 0.98).opacity(0.10), .clear],
+                center: UnitPoint(x: 0.5, y: 0.22),
+                startRadius: 10, endRadius: 330
+            )
         }
-    }
-
-    /// 自举：给自己写一条「完全磁盘访问权限」到系统库（需要管理员）。
-    /// 别的机器上若用户库读不了，就是靠这一步把工具自己救活。
-    private func selfFDA() {
-        busy = true
-        defer { busy = false }
-        log.add("— 给自己授予完全磁盘访问权限（写系统库，会弹管理员密码）—")
-        let info = TCCCore.inspect(path: Bundle.main.bundlePath)
-        log.add("本 App：\(Bundle.main.bundlePath)")
-        var tmp: String? = nil
-        if info.hasDR {
-            let (data, note) = TCCCore.makeCsreq(dr: info.dr)
-            log.add(data == nil ? "✗ \(note)" : "✓ \(note)")
-            guard let data else { return }
-            let p = NSTemporaryDirectory() + "tcchelper-self-\(UUID().uuidString).bin"
-            do { try data.write(to: URL(fileURLWithPath: p)) } catch {
-                log.add("✗ 写临时文件失败：\(error.localizedDescription)")
-                return
-            }
-            tmp = p
-        } else {
-            log.add("本 App 是 ad-hoc 签名（没有显式 DR）⇒ csreq 留空")
-        }
-        defer { if let p = tmp { try? FileManager.default.removeItem(atPath: p) } }
-        let bid = Bundle.main.bundleIdentifier ?? "com.geek.tcchelper"
-        let r = TCCCore.grantFullDiskAccess(client: bid, csreqPath: tmp)
-        log.add(r.status == 0 ? "✓ 已写入系统库（client=\(bid)）" : "✗ 失败：\(r.combined)")
-        sleep(1)
-        selfCheck()
-    }
-
-    private func setApp(_ path: String) {
-        var p = path
-        // 用户可能拖进来的是包内可执行文件，往上找 .app
-        if !p.hasSuffix(".app") {
-            var cur = p
-            while cur != "/" && cur != "" {
-                cur = (cur as NSString).deletingLastPathComponent
-                if cur.hasSuffix(".app") { p = cur; break }
-            }
-        }
-        app = TCCCore.inspect(path: p)
-        log.add("目标 = \(app.path)")
-        log.add("  bundle id = \(app.bundleID.isEmpty ? "（无）" : app.bundleID)；签名 = \(app.hasDR ? "有显式 DR" : "无显式 DR")")
-        refresh()
-    }
-
-    private func pickApp() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.treatsFilePackagesAsDirectories = true   // ★ 可以钻进 .app 里选子组件
-        panel.message = "选一个 .app；需要给包内子组件授权时，可以进到它内部去选"
-        if panel.runModal() == .OK, let u = panel.url { setApp(u.path) }
-    }
-
-    private func pickRunning() {
-        let apps = NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular || $0.bundleIdentifier != nil }
-            .compactMap { a -> (String, String)? in
-                guard let b = a.bundleURL?.path, let id = a.bundleIdentifier else { return nil }
-                return (b, id)
-            }
-            .sorted { $0.1 < $1.1 }
-        let alert = NSAlert()
-        alert.messageText = "选择运行中的 App"
-        alert.informativeText = "只列出有 bundle 的进程。包内后台组件（如 xxxhelper）也在里面。"
-        let pop = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 26))
-        for (p, id) in apps { pop.addItem(withTitle: id); pop.lastItem?.representedObject = p }
-        alert.accessoryView = pop
-        alert.addButton(withTitle: "选择")
-        alert.addButton(withTitle: "取消")
-        if alert.runModal() == .alertFirstButtonReturn,
-           let p = pop.selectedItem?.representedObject as? String {
-            setApp(p)
-        }
-    }
-
-    private func refresh() {
-        guard !app.path.isEmpty else { return }
-        entries = TCCCore.entries(db: db, client: clientValue)
-        log.add("\(db.title) 中 client=\(clientValue) 的条目：\(entries.count) 条")
-    }
-
-    private func doDryRun() {
-        busy = true
-        defer { busy = false }
-        log.add("— 预演 —")
-        if app.hasDR {
-            let (data, note) = TCCCore.makeCsreq(dr: app.dr)
-            log.add(data == nil ? "✗ \(note)" : "✓ \(note)")
-        } else {
-            log.add("csreq 将留空（目标没有显式 DR，按 \(clientType == 0 ? "Bundle ID" : "路径") 匹配）")
-        }
-        log.add("将写入：service=\(service) client=\(clientValue) client_type=\(clientType) → \(db.title)")
-    }
-
-    private func doGrant() {
-        busy = true
-        defer { busy = false }
-        log.add("— 授权 —")
-        var csreqPath: String? = nil
-        if app.hasDR {
-            let (data, note) = TCCCore.makeCsreq(dr: app.dr)
-            log.add(data == nil ? "✗ \(note)" : "✓ \(note)")
-            guard let data else { return }
-            let tmp = NSTemporaryDirectory() + "tcchelper-blob-\(UUID().uuidString).bin"
-            do { try data.write(to: URL(fileURLWithPath: tmp)) } catch {
-                log.add("✗ 写临时文件失败：\(error.localizedDescription)"); return
-            }
-            csreqPath = tmp
-        } else {
-            log.add("csreq 留空（目标没有显式 DR，按 \(clientType == 0 ? "Bundle ID" : "路径") 匹配）")
-        }
-
-        if let bk = TCCCore.backup(db) { log.add("已备份 → \(bk)") }
-        else { log.add("⚠️ 备份失败（可能缺完全磁盘访问权限），继续尝试") }
-
-        let sql = csreqPath != nil
-            ? TCCCore.grantSQL(service: service, client: clientValue,
-                               clientType: clientType, csreqPath: csreqPath!)
-            : TCCCore.grantSQLNoCsreq(service: service, client: clientValue, clientType: clientType)
-
-        let r = TCCCore.apply(sql: sql, db: db, needAdmin: false)
-        if csreqPath != nil { try? FileManager.default.removeItem(atPath: csreqPath!) }
-        if r.status != 0 {
-            log.add("✗ 写入失败：\(r.combined)")
-            log.add("  ⇒ 用户库读不了 / 写不了时，先点「给自己完全磁盘访问」；系统库会弹管理员密码。")
-            return
-        }
-        log.add("✓ 写入成功")
-
-        let k = TCCCore.restartTCCD(needAdmin: false)
-        log.add(k.status == 0 ? "已重启 tccd" : "tccd 重启返回 \(k.status)（root 那份拒绝属正常）")
-        sleep(1)
-        refresh()
-        let alive = entries.contains { $0.service == service && $0.authValue == 2 }
-        log.add(alive ? "✓ 回读验证：条目在，且 auth_value=2（被 tccd 接受）"
-                      : "⚠️ 回读没看到该条目 —— 可能被 tccd 判为无效清掉了")
-    }
-
-    private func doRevoke() {
-        busy = true
-        defer { busy = false }
-        log.add("— 撤销 —")
-        if let bk = TCCCore.backup(db) { log.add("已备份 → \(bk)") }
-        let sql = TCCCore.revokeSQL(service: service, client: clientValue, clientType: clientType)
-        let r = TCCCore.apply(sql: sql, db: db, needAdmin: false)
-        if r.status != 0 { log.add("✗ 撤销失败：\(r.combined)"); return }
-        log.add("✓ 已删除该条目")
-        _ = TCCCore.restartTCCD(needAdmin: false)
-        sleep(1)
-        refresh()
-    }
-
-    // MARK: 自动授权
-
-    private func setAllSelected(_ v: Bool) {
-        for i in autoTargets.indices { autoTargets[i].selected = v }
-    }
-
-    private func onlyMissing() {
-        for i in autoTargets.indices { autoTargets[i].selected = !autoTargets[i].missing.isEmpty }
-    }
-
-    private func runAutoScan(quiet: Bool = false) {
-        if scanning { return }
-        if !quiet { log.add("— 自动扫描 —") }
-        var roots: [String] = []
-        if autoScanApps { roots.append("/Applications") }
-        let useL = autoScanLaunchd
-        let useR = autoScanRunning
-        scanning = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let t0 = Date()
-            let found = AutoGrant.scan(roots: roots, includeLaunchd: useL, includeRunning: useR)
-            let dt = String(format: "%.1f", Date().timeIntervalSince(t0))
-            DispatchQueue.main.async {
-                self.autoTargets = found
-                self.scanning = false
-                self.log.add("扫到 \(found.count) 个声明了权限的 App，用时 \(dt)s")
-                let missing = found.filter { !$0.missing.isEmpty }
-                if quiet {
-                    self.log.add("其中 \(missing.count) 个还有未授权项 —— 在「2 · 自动授权」里勾选后点授权")
-                } else {
-                    self.log.add("其中 \(missing.count) 个还有未授权项：")
-                    for t in missing {
-                        self.log.add("  · \(t.displayName) [\(t.bundleID)] → \(t.missing.joined(separator: ", "))")
-                    }
-                    if missing.isEmpty { self.log.add("  （都齐了）") }
-                }
-            }
-        }
-    }
-
-    private func runAutoApply() {
-        let picked = autoTargets.filter { $0.selected && !$0.missing.isEmpty }
-        guard !picked.isEmpty else {
-            log.add("没有选中的、且还缺权限的项 —— 先扫描，再勾选。")
-            return
-        }
-        let targetDB = db
-        busy = true
-        log.add("— 批量授权 \(picked.count) 个 App —")
-        DispatchQueue.global(qos: .userInitiated).async {
-            let enriched = AutoGrant.enrichAll(picked)   // 并行补签名，别串行跑几十次 codesign
-            let res = AutoGrant.applyBatch(enriched, db: targetDB)
-            DispatchQueue.main.async {
-                for l in res.log { self.log.add(l) }
-                self.busy = false
-                self.runAutoScan(quiet: true)   // 就地重扫，看结果
-            }
-        }
+        .ignoresSafeArea()
     }
 }
 
 // MARK: - 入口
 
+#if !SNAPSHOT
 @main
 struct TCCHelperApp: App {
     var body: some Scene {
-        WindowGroup("TCC Helper") {
-            ContentView()
+        WindowGroup {
+            RootView()
         }
-        .windowResizability(.contentMinSize)
+        .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+        }
     }
 }
+#endif

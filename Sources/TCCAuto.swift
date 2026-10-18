@@ -29,6 +29,11 @@ struct AutoTarget: Identifiable {
 enum AutoGrant {
 
     /// Info.plist 键 → TCC 服务。顺序无所谓，后面会按系统真实服务清单过滤。
+    ///
+    /// ★ macOS 15 起「系统音频录制」并入了「屏幕录制」权限（kTCCServiceScreenCapture，
+    ///   存在**系统库**），而 kTCCServiceAudioCapture 仍留在用户库给旧 API 用。
+    ///   同一个 App 往往两条都要：用户库那条给 CoreAudio 的旧接口，系统库那条给新接口。
+    ///   这里只映射用户库那条 —— 系统库必须走高级模式（写它要管理员密码）。
     static let usageMap: [(key: String, service: String)] = [
         ("NSMicrophoneUsageDescription",              "kTCCServiceMicrophone"),
         ("NSCameraUsageDescription",                  "kTCCServiceCamera"),
@@ -164,13 +169,21 @@ enum AutoGrant {
 
     // MARK: 候选来源
 
+    /// 会被当作「可执行包」收集的扩展名。
+    /// ★ 只认 .app 会漏掉 AudioServerPlugIn —— 典型例子是 SoundSource 的
+    ///   `/Library/Audio/Plug-Ins/HAL/ARK.driver`，它的真正申请者
+    ///   `Audio Routing Kit (ARK).app`（com.rogueamoeba.arkaudiod）藏在
+    ///   `ARK.driver/Contents/Resources/` 里。只扫 .app 的话整个驱动被跳过，
+    ///   用户就会看到「ARK 需要授权」的弹窗却没人处理。
+    static let bundleSuffixes = [".app", ".driver", ".xpc", ".appex", ".plugin", ".kext"]
+
     static func appsUnder(_ root: String, depth: Int = 2) -> [String] {
         var out: [String] = []
         func walk(_ dir: String, _ d: Int) {
             guard d >= 0, let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return }
             for n in names {
                 let p = dir + "/" + n
-                if n.hasSuffix(".app") { out.append(p); continue }
+                if bundleSuffixes.contains(where: { n.hasSuffix($0) }) { out.append(p); continue }
                 var isDir: ObjCBool = false
                 if FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue {
                     walk(p, d - 1)
