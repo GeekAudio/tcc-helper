@@ -43,7 +43,21 @@ TCC Helper 反过来做：读每个 App 的 `Info.plist`，反推它声明了哪
 
 [Releases](https://github.com/GeekAudio/tcc-helper/releases/latest) · 需要 macOS 13+
 
-ad-hoc 签名，首次打开请 **右键 → 打开**。
+ad-hoc 签名（本机没有 Developer ID，未经公证）。首次打开 macOS 会拦下来，提示「无法打开，因为 Apple
+无法验证此 App 是否包含恶意软件」。
+
+**macOS 15 起「右键 → 打开」已经失效**，请走这里：
+
+1. 打开 **系统设置 → 隐私与安全性**
+2. 往下滚到 **安全性**，会看到一行「已阻止使用 TCC Helper，因为来自身份不明的开发者」
+3. 点 **仍要打开**，输入登录密码 / Touch ID 确认
+4. 再双击一次 App，弹窗里选 **打开**
+
+如果提示的是「已损坏，无法打开，你应该将它移到废纸篓」，那是下载时带的隔离标记没清掉，终端跑一行：
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/TCC Helper.app"
+```
 
 ---
 
@@ -90,4 +104,19 @@ driver used by SoundSource lives inside `ARK.driver/Contents/Resources/`.
 
 [Releases](https://github.com/GeekAudio/tcc-helper/releases/latest) · macOS 13+
 
-Ad-hoc signed; right-click → Open on first launch.
+Ad-hoc signed (no Developer ID, not notarized), so macOS blocks it on first launch with *"Apple could not
+verify that TCC Helper is free of malware."*
+
+**Right-click → Open stopped working in macOS 15.** Do this instead:
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll down to **Security** — you'll see *"TCC Helper was blocked because it is from an unidentified developer"*
+3. Click **Open Anyway**, then authenticate with your password / Touch ID
+4. Double-click the app again and choose **Open**
+
+If macOS instead says the app *"is damaged and can't be opened"*, the quarantine flag survived the download —
+clear it in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/TCC Helper.app"
+```
