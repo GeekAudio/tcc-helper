@@ -37,6 +37,10 @@ fi
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "== ad-hoc 签名 =="
+# ★ 项目目录在 Documents 下，可能被 iCloud/FileProvider 同步，
+#   目录上会带 com.apple.FinderInfo、com.apple.fileprovider.fpfs#P 这类属性，
+#   codesign 见到直接拒绝：resource fork, Finder information, or similar detritus not allowed
+xattr -cr "$APP"
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || {
   echo "签名失败"; exit 1;
 }

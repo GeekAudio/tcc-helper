@@ -16,6 +16,24 @@ struct Notice: Equatable {
     var ok: Bool = true
 }
 
+// MARK: - 关联组件
+
+/// 同一个套件里可能有好几个可执行体：主 App、包内 helper、launchd 常驻的后台 agent。
+/// 权限记在谁名下，取决于谁真正去申请 —— 罗技 Logi Options+ 就是主 App 有输入监控、
+/// 真正监听按键的 agent（com.logi.cp-dev-mgr）反而没有。
+struct RelatedComponent: Identifiable {
+    var id: String { path }
+    var path: String
+    var bundleID: String
+    var isMain: Bool
+    var declared: [String]
+    var grantedUser: [String]
+    var grantedSystem: [String]
+
+    var grantedTotal: Int { grantedUser.count + grantedSystem.count }
+    var name: String { ((path as NSString).lastPathComponent as NSString).deletingPathExtension }
+}
+
 // MARK: - 状态
 
 @MainActor
@@ -30,6 +48,7 @@ final class AdvancedModel: ObservableObject {
     @Published var busy = false
     @Published var notice: Notice?
     @Published var dropTargeted = false
+    @Published var components: [RelatedComponent] = []
 
     var clientValue: String {
         if !forcePath && !app.bundleID.isEmpty { return app.bundleID }
@@ -74,6 +93,57 @@ final class AdvancedModel: ObservableObject {
     }
 
     // MARK: 目标应用
+
+    // MARK: 关联组件
+
+    /// 列出主 App、包内组件、launchd 常驻 helper，并查它们各自在 TCC 库里已有什么。
+    func checkComponents() {
+        guard !app.path.isEmpty else {
+            notice = Notice(key: "pickTargetFirst", ok: false)
+            return
+        }
+
+        var list: [RelatedComponent] = []
+        var seen = Set<String>()
+
+        func add(_ p: String, main: Bool = false) {
+            guard !seen.contains(p) else { return }
+            seen.insert(p)
+            guard let bid = AutoGrant.bundleID(of: p), !bid.isEmpty else { return }
+
+            var declared = AutoGrant.services(forBundle: p)
+            for s in AutoGrant.systemServices(forBundle: p) where !declared.contains(s) {
+                declared.append(s)
+            }
+
+            list.append(RelatedComponent(path: p,
+                                         bundleID: bid,
+                                         isMain: main,
+                                         declared: declared,
+                                         grantedUser: Self.grantedServices(bid, .user),
+                                         grantedSystem: Self.grantedServices(bid, .system)))
+        }
+
+        add(app.path, main: true)
+        for n in AutoGrant.nestedApps(in: app.path) { add(n) }
+        for prog in AutoGrant.launchdPrograms() {
+            if let b = AutoGrant.enclosingApp(of: prog) { add(b) }
+        }
+
+        components = list.sorted {
+            if $0.isMain != $1.isMain { return $0.isMain }
+            return $0.bundleID < $1.bundleID
+        }
+    }
+
+    /// 某个 client 在指定库里已「允许」的服务
+    static func grantedServices(_ client: String, _ db: TCCDB) -> [String] {
+        let r = Sh.run("/usr/bin/sqlite3",
+                       ["-separator", "|", db.path,
+                        "select service from access where client=\(TCCCore.shellQuote(client)) and auth_value=2 order by service;"])
+        guard r.status == 0 else { return [] }
+        return r.out.split(separator: "\n").map(String.init)
+    }
 
     func setApp(_ path: String) {
         var p = path
@@ -308,6 +378,7 @@ struct AdvancedView: View {
         VStack(spacing: 12) {
             databaseCard
             targetCard
+            componentsCard
             serviceCard
             actionCard
             entriesCard
@@ -498,6 +569,72 @@ struct AdvancedView: View {
     }
 
     // MARK: 权限服务
+
+    // MARK: 关联组件
+
+    private var componentsCard: some View {
+        Card(lang.t("components")) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(lang.t("componentsHint"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button(lang.t("checkComponents")) { m.checkComponents() }
+                        .controlSize(.small)
+                        .disabled(m.app.path.isEmpty || m.busy)
+                }
+
+                if m.components.isEmpty {
+                    Text(lang.t("noComponents"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                } else {
+                    VStack(spacing: 4) {
+                        ForEach(m.components) { c in
+                            componentRow(c)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func componentRow(_ c: RelatedComponent) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: c.isMain ? "app.fill" : "gearshape.2.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(c.isMain ? Color.accentColor : .secondary)
+                .frame(width: 12)
+
+            Text(c.name)
+                .font(.system(size: 10.5, weight: c.isMain ? .medium : .regular))
+                .frame(width: 140, alignment: .leading)
+                .lineLimit(1)
+
+            Text(c.bundleID)
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Spacer(minLength: 6)
+
+            Text(lang.f("declaredCount", c.declared.count))
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+
+            Text(lang.f("grantedCount", c.grantedTotal))
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(c.grantedTotal >= c.declared.count ? .green : .orange)
+
+            if !c.isMain {
+                Button(lang.t("useComponent")) { m.setApp(c.path) }
+                    .controlSize(.mini)
+            }
+        }
+        .padding(.vertical, 1)
+    }
 
     private var serviceCard: some View {
         Card(lang.t("service")) {

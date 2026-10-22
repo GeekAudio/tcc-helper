@@ -81,6 +81,15 @@ enum CopyTable {
         "serviceNote":      "清单在运行时从系统权限服务里抽取，系统认的都在。",
         "current":          "当前",
 
+        // 高级模式 · 关联组件
+        "components":       "关联组件",
+        "componentsHint":   "有些套件把权限记在后台组件上，而不是主应用。授权给主应用没用，得给真正申请权限的那一个。",
+        "checkComponents":  "检查",
+        "useComponent":     "选中",
+        "noComponents":     "点「检查」列出主应用、包内组件和 launchd 注册的后台组件。",
+        "declaredCount":    "声明 %d 项",
+        "grantedCount":     "已授权 %d 项",
+
         // 高级模式 · 操作
         "actions":          "操作",
         "preview":          "预演",
@@ -181,6 +190,15 @@ enum CopyTable {
         "serviceFilter":    "Filter permissions",
         "serviceNote":      "The list is extracted from the system permission service at runtime, so it covers everything macOS knows.",
         "current":          "Current",
+
+        // Advanced · related components
+        "components":       "Related Components",
+        "componentsHint":   "Some suites record permissions against a background helper instead of the main app. Granting the main app does nothing — you have to grant the one that actually asks.",
+        "checkComponents":  "Check",
+        "useComponent":     "Use",
+        "noComponents":     "Hit Check to list the main app, bundled components and launchd helpers.",
+        "declaredCount":    "%d declared",
+        "grantedCount":     "%d granted",
 
         // Advanced · actions
         "actions":          "Actions",
