@@ -39,6 +39,27 @@ enum CopyTable {
         "chinese":          "简体中文",
         "english":          "English",
 
+        // Computer Use
+        "cuEntry":          "Computer Use 授权",
+        "cuSubtitle":       "修复 ChatGPT / Codex 的电脑操作权限",
+        "cuAccessibility":  "辅助功能 · 点击与输入",
+        "cuScreenCapture":  "屏幕录制 · 查看应用界面",
+        "cuMissing":        "待授权",
+        "cuUnreadable":     "无法读取",
+        "cuAdminHint":      "仅授权屏幕录制与辅助功能。写入前自动备份，macOS 会要求管理员验证。",
+        "cuNotFound":       "未找到 Computer Use 组件。请先在 ChatGPT 或 Codex 中安装并启用 Computer Use，再重新检测。",
+        "cuChecking":       "正在检测 Computer Use…",
+        "cuAuthorizing":    "正在授权，请完成系统管理员验证…",
+        "cuRefresh":        "重新检测",
+        "cuGrant":          "补齐权限",
+        "cuRegrant":        "重新授权",
+        "cuReady":          "屏幕录制与辅助功能均已允许。",
+        "cuCompleted":      "授权完成，已回读确认两项权限与应用签名。",
+        "cuUnsigned":       "无法读取组件的完整签名，请重新安装官方 Computer Use 组件。",
+        "cuSignatureFailed": "无法生成组件签名，尚未写入权限。",
+        "cuWriteFailed":    "授权未完成。请确认管理员验证成功且数据库可写，然后重试。",
+        "cuVerifyFailed":   "写入后未能确认两项权限，请重新检测；必要时重新启动 ChatGPT 或 Codex。",
+
         // 高级模式 · 通用
         "advancedTitle":    "高级模式",
         "close":            "关闭",
@@ -125,6 +146,26 @@ enum CopyTable {
     ]
 
     static let en: [String: String] = [
+        // Computer Use
+        "cuEntry":          "Authorize Computer Use",
+        "cuSubtitle":       "Repair desktop access for ChatGPT / Codex",
+        "cuAccessibility":  "Accessibility · click and type",
+        "cuScreenCapture":  "Screen Recording · view apps",
+        "cuMissing":        "Not granted",
+        "cuUnreadable":     "Unreadable",
+        "cuAdminHint":      "Grants only Screen Recording and Accessibility. A backup is made first, and macOS asks for administrator authentication.",
+        "cuNotFound":       "Computer Use was not found. Install and enable Computer Use in ChatGPT or Codex, then check again.",
+        "cuChecking":       "Checking Computer Use…",
+        "cuAuthorizing":    "Authorizing. Complete the macOS administrator prompt…",
+        "cuRefresh":        "Check Again",
+        "cuGrant":          "Grant Permissions",
+        "cuRegrant":        "Reauthorize",
+        "cuReady":          "Screen Recording and Accessibility are both allowed.",
+        "cuCompleted":      "Authorized. Both permissions and the app signature were verified.",
+        "cuUnsigned":       "The component has no designated signature. Reinstall the official Computer Use component.",
+        "cuSignatureFailed": "Could not generate the component signature. No permissions were written.",
+        "cuWriteFailed":    "Authorization did not finish. Check administrator authentication and database access, then retry.",
+        "cuVerifyFailed":   "Both permissions could not be verified. Check again, and restart ChatGPT or Codex if needed.",
         // Main
         "tagline":          "One-click permission repair",
         "lead":             "Fills in missing permissions for every installed app.",

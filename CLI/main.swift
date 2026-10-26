@@ -11,6 +11,7 @@ func usage() -> Never {
 
     用法：
       tcchelper-cli services                              列出系统认识的全部服务
+      tcchelper-cli computer-use [--apply] [--app PATH]   检测 Computer Use；--apply 补齐两项系统权限
       tcchelper-cli auto [--root DIR]... [--apply]        自动扫描并授权（默认只预演）
                        [--no-launchd] [--no-running] [--service kTCCServiceX]
       tcchelper-cli inspect  <App>                        看目标 App 的 bundle id / 签名
@@ -40,7 +41,7 @@ func positional() -> [String] {
     var skip = false
     for a in argv {
         if skip { skip = false; continue }
-        if a.hasPrefix("--") { skip = (a == "--db"); continue }
+        if a.hasPrefix("--") { skip = ["--db", "--app", "--root", "--service"].contains(a); continue }
         out.append(a)
     }
     return out
@@ -59,6 +60,41 @@ func clientOf(_ info: AppInfo) -> (String, Int) {
 }
 
 switch cmd {
+
+case "computer-use":
+    let path = flag("--app") ?? ComputerUse.discover().first
+    guard let path, ComputerUse.isHelper(at: path) else {
+        print("未找到 Computer Use 组件。请先在 ChatGPT / Codex 中安装并启用 Computer Use。")
+        exit(1)
+    }
+    func printStatus(_ status: ComputerUse.Status) {
+        print("目标    : \(path)")
+        print("client  : \(ComputerUse.bundleID)")
+        print("数据库  : \(TCCDB.system.path)")
+        for service in ComputerUse.requiredServices {
+            let state = !status.readable ? "无法读取" : status.granted.contains(service) ? "已允许" : "待授权"
+            print("  \(state)  \(service)")
+        }
+    }
+    if !has("--apply") {
+        printStatus(ComputerUse.status(path: path))
+        print("（这是检测；加 --apply 才授权，仅处理辅助功能和屏幕录制）")
+        exit(0)
+    }
+    let result = ComputerUse.authorize(path: path)
+    printStatus(result.status)
+    guard result.succeeded else {
+        switch result.failure {
+        case .notFound: print("✗ 未找到有效的 Computer Use 组件")
+        case .unsigned: print("✗ 组件没有完整签名，请重新安装官方 Computer Use 组件")
+        case .signature: print("✗ 无法生成组件签名，未写入权限")
+        case .write: print("✗ 备份或授权未完成，请检查管理员验证与数据库写入权限")
+        default: print("✗ 未能回读确认两项权限与应用签名")
+        }
+        if !result.detail.isEmpty { print(result.detail) }
+        exit(1)
+    }
+    print("✓ 已备份并授权，回读确认两项权限与签名均匹配")
 
 case "services":
     let all = ServiceCatalog.all()

@@ -9,22 +9,31 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT
 OUT="$ROOT/$FILEBASE-$VERSION.dmg"
 
 echo "== 1) 构建 App =="
-sh "$ROOT/build.sh" | tail -3
+sh "$ROOT/build.sh"
 
 echo "== 2) 构建 CLI =="
 SDK="$(xcrun --show-sdk-path)"
 mkdir -p "$ROOT/bin"
-swiftc -swift-version 5 -target x86_64-apple-macos13.0 -sdk "$SDK" -O -framework AppKit \
-  -o "$ROOT/bin/tcchelper-cli" \
-  "$ROOT/Sources/TCCCore.swift" "$ROOT/Sources/TCCAuto.swift" "$ROOT/CLI/main.swift"
+CLI_BUILD="$(mktemp -d "${TMPDIR:-/tmp}/tcc-cli.XXXXXX")"
+trap 'rm -rf "$CLI_BUILD"' EXIT
+for ARCH in x86_64 arm64; do
+  swiftc -swift-version 5 -target "$ARCH-apple-macos13.0" -sdk "$SDK" -O -framework AppKit \
+    -o "$CLI_BUILD/tcchelper-cli-$ARCH" \
+    "$ROOT/Sources/TCCCore.swift" "$ROOT/Sources/TCCAuto.swift" \
+    "$ROOT/Sources/ComputerUse.swift" "$ROOT/CLI/main.swift"
+done
+lipo -create "$CLI_BUILD/tcchelper-cli-x86_64" "$CLI_BUILD/tcchelper-cli-arm64" -output "$ROOT/bin/tcchelper-cli"
+codesign --force --sign - "$ROOT/bin/tcchelper-cli"
+codesign --verify --strict "$ROOT/bin/tcchelper-cli"
+rm -rf "$CLI_BUILD"
 
 echo "== 3) 摆盘面 =="
 STAGE="$(mktemp -d /tmp/tccdmg.XXXXXX)"
-trap 'rm -rf "$STAGE"' EXIT
-cp -R "$ROOT/TCC Helper.app" "$STAGE/"
+trap 'rm -rf "$STAGE" "$CLI_BUILD"' EXIT
+ditto --norsrc --noextattr "$ROOT/TCC Helper.app" "$STAGE/TCC Helper.app"
 ln -s /Applications "$STAGE/Applications"      # 拖拽目标
 cp "$ROOT/README.md" "$STAGE/README.md"
-cp "$ROOT/bin/tcchelper-cli" "$STAGE/tcchelper-cli"
+ditto --norsrc --noextattr "$ROOT/bin/tcchelper-cli" "$STAGE/tcchelper-cli"
 ls -la "$STAGE" | sed 's/^/   /'
 
 echo "== 4) 生成 DMG =="
@@ -32,16 +41,23 @@ rm -f "$OUT"
 hdiutil create -volname "$NAME" -srcfolder "$STAGE" -ov -format UDZO -fs HFS+ "$OUT" >/dev/null
 
 echo "== 5) 校验：挂载看一眼 =="
-MP="$(hdiutil attach "$OUT" -nobrowse -readonly | grep -o '/Volumes/.*' | head -1)"
+MP="$(hdiutil attach "$OUT" -nobrowse -readonly | sed -n 's|.*\(/Volumes/.*\)|\1|p' | head -1)"
+test -n "$MP"
+trap 'hdiutil detach "$MP" >/dev/null 2>&1 || true; rm -rf "$STAGE" "$CLI_BUILD"' EXIT
 echo "   挂载点：$MP"
 ls -la "$MP" | sed 's/^/   /'
 if [ -d "$MP/TCC Helper.app" ] && [ -L "$MP/Applications" ]; then
   echo "   ✔ 结构正确（App + Applications 软链）"
 else
   echo "   ✘ 结构异常"
+  exit 1
 fi
-codesign -dv "$MP/TCC Helper.app" 2>&1 | grep -E "Identifier|Signature" | sed 's/^/   /'
+codesign --verify --deep --strict "$MP/TCC Helper.app"
+codesign --verify --strict "$MP/tcchelper-cli"
+lipo -archs "$MP/TCC Helper.app/Contents/MacOS/TCCHelper"
+lipo -archs "$MP/tcchelper-cli"
 hdiutil detach "$MP" >/dev/null
+trap 'rm -rf "$STAGE" "$CLI_BUILD"' EXIT
 echo "   已卸载"
 
 echo

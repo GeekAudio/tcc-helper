@@ -2,7 +2,7 @@
 //
 // 设计原则：
 //   · 默认只有一个按钮。点一下：扫描 → 写入 → 完成，全过程有动画。
-//   · 所有手动能力收进「高级模式」，主界面不出现。
+//   · 手动能力收进「高级模式」；Computer Use 提供独立快捷入口。
 //   · 不写日志。每一步的结果直接体现在按钮和状态行上。
 //   · 文案全部走 L10n，界面不会中英混排。
 
@@ -404,6 +404,7 @@ struct RootView: View {
     @StateObject private var model = GrantModel()
     @State private var showAdvanced = false
     @State private var showLang = false
+    @State private var showComputerUse = false
 
     var body: some View {
         ZStack {
@@ -416,6 +417,14 @@ struct RootView: View {
                 statusLine
                     .padding(.top, 12)
                 Spacer(minLength: 6)
+                Button {
+                    showComputerUse = true
+                } label: {
+                    Label(lang.t("cuEntry"), systemImage: "desktopcomputer")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .disabled(model.busy)
+                .padding(.bottom, 16)
                 footer
                     .padding(.bottom, 16)
             }
@@ -425,6 +434,9 @@ struct RootView: View {
         .environmentObject(lang)
         .sheet(isPresented: $showAdvanced) {
             AdvancedView().environmentObject(lang)
+        }
+        .sheet(isPresented: $showComputerUse) {
+            ComputerUseView().environmentObject(lang)
         }
     }
 

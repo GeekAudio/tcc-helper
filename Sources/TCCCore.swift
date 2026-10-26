@@ -441,18 +441,31 @@ enum TCCCore {
     ///      下次查又变回 0），而且用户看不到任何报错。
     static func apply(sql: String, db: TCCDB, needAdmin: Bool) -> ProcResult {
         if needAdmin || db == .system {
-            let script = """
-            #!/bin/sh
-            /bin/cp -p \(shellQuote(db.path)) \(shellQuote(db.path)).bak-$(date +%Y%m%dT%H%M%SZ) 2>/dev/null
-            /usr/bin/sqlite3 \(shellQuote(db.path)) <<'TCCSQL'
-            \(sql)
-            TCCSQL
-            \(kickstartCmd)
-            exit 0
-            """
+            let backupPath = db.path + ".bak-" + UUID().uuidString
+            let script = privilegedWriteScript(sql: sql, databasePath: db.path,
+                                               backupPath: backupPath, restartCommand: kickstartCmd)
             return Sh.runAsAdmin(script: script)
         }
-        return Sh.run("/usr/bin/sqlite3", [db.path, sql])
+        return Sh.run("/usr/bin/sqlite3", ["-bail", db.path, sql])
+    }
+
+    /// 备份或 SQL 失败就停止，不能被重启服务的成功退出码掩盖。
+    /// SQLite 备份同时包含 WAL 中的已提交记录。
+    static func privilegedWriteScript(sql: String, databasePath: String,
+                                      backupPath: String, restartCommand: String) -> String {
+        let destination = backupPath.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let delimiter = "TCCSQL_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        return """
+        #!/bin/sh
+        set -e
+        umask 077
+        /usr/bin/sqlite3 -bail \(shellQuote(databasePath)) \(shellQuote(".backup \"" + destination + "\""))
+        /usr/bin/sqlite3 -bail \(shellQuote(databasePath)) <<'\(delimiter)'
+        \(sql)
+        \(delimiter)
+        \(restartCommand)
+        """
     }
 
     /// 让 tccd 丢掉内存缓存、重新读库。

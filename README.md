@@ -22,6 +22,18 @@ TCC Helper 反过来做：读每个 App 的 `Info.plist`，反推它声明了哪
 
 **高级模式**——手动选数据库、挑目标应用、指定服务，预演 / 授权 / 撤销 / 查看现有条目。
 
+**Computer Use 授权**——主界面点击「Computer Use 授权」，自动找到 ChatGPT / Codex 实际使用的电脑操作组件，显示并补齐**辅助功能**和**屏幕录制**权限。也会纳入「一键授权」的自动扫描，不用手动钻进隐藏目录找 helper。
+
+专用入口只处理这两项权限，写入前自动备份系统数据库，写入后重启权限服务并回读验证。管理员验证取消、备份失败或写入失败都会提示未完成。未安装组件时，请先在 ChatGPT / Codex 中安装并启用 Computer Use；应用内的逐应用批准和浏览器扩展仍由 ChatGPT / Codex 管理。权限要求见 [OpenAI 官方文档](https://learn.chatgpt.com/docs/computer-use)。
+
+DMG 同时提供 Intel / Apple Silicon 通用版本的 App 和 CLI。命令行也可以单独检测或修复：
+
+```sh
+./tcchelper-cli computer-use           # 只检测，不写入
+./tcchelper-cli computer-use --apply   # 备份后补齐两项系统权限
+./tcchelper-cli computer-use --app "/自定义位置/Codex Computer Use.app" --apply
+```
+
 ## 覆盖范围
 
 | 数据库 | 权限 |
@@ -82,6 +94,23 @@ then writes the corresponding rows into the TCC database.
   database asks for an admin password once.
 - **Advanced** — pick the database, target app and service manually; preview, grant, revoke and
   inspect existing entries.
+- **Authorize Computer Use** — finds the actual ChatGPT / Codex desktop-control helper, shows its
+  Accessibility and Screen Recording status, and repairs these two permissions. The helper is also
+  included in Grant All, even when it is not running. Custom `CODEX_HOME` locations are supported.
+
+The dedicated action grants only these two system permissions. It backs up the database before
+writing, restarts the permission service, and verifies the permissions and app signature afterwards.
+Cancelled authentication, backup errors and write failures are reported. Install and enable
+Computer Use in ChatGPT / Codex first; per-app approvals and browser extensions are still managed
+there. See [OpenAI's setup guide](https://learn.chatgpt.com/docs/computer-use).
+
+The DMG includes universal Intel / Apple Silicon builds of the app and CLI:
+
+```sh
+./tcchelper-cli computer-use           # inspect only
+./tcchelper-cli computer-use --apply   # back up and grant both system permissions
+./tcchelper-cli computer-use --app "/custom/path/Codex Computer Use.app" --apply
+```
 
 ### Scope
 

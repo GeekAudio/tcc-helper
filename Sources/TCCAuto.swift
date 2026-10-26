@@ -39,7 +39,7 @@ enum AutoGrant {
     /// ★ macOS 15 起「系统音频录制」并入了「屏幕录制」权限（kTCCServiceScreenCapture，
     ///   存在**系统库**），而 kTCCServiceAudioCapture 仍留在用户库给旧 API 用。
     ///   同一个 App 往往两条都要：用户库那条给 CoreAudio 的旧接口，系统库那条给新接口。
-    ///   这里只映射用户库那条 —— 系统库必须走高级模式（写它要管理员密码）。
+    ///   这里只映射用户库那条，系统库由 systemServices 单独处理。
     static let usageMap: [(key: String, service: String)] = [
         ("NSMicrophoneUsageDescription",              "kTCCServiceMicrophone"),
         ("NSCameraUsageDescription",                  "kTCCServiceCamera"),
@@ -151,6 +151,12 @@ enum AutoGrant {
             guard info[key] != nil else { continue }
             guard known.isEmpty || known.contains(service) else { continue }
             if !out.contains(service) { out.append(service) }
+        }
+        // Computer Use 不通过 usage description 声明这两项，必须识别真正的 helper。
+        if ComputerUse.isHelper(at: bundle) {
+            for service in ComputerUse.requiredServices where !out.contains(service) {
+                if known.isEmpty || known.contains(service) { out.append(service) }
+            }
         }
         return out
     }
@@ -269,6 +275,7 @@ enum AutoGrant {
         }
 
         if includeHelpers {
+            for path in ComputerUse.discover(runningPaths: []) { add(path, "Computer Use") }
             for d in helperDirs {
                 for a in appsUnder(d, depth: 3) { add(a, "组件目录 \(d)") }
             }
@@ -398,13 +405,7 @@ enum AutoGrant {
             res.log.append("⚠️ 备份失败（可能缺完全磁盘访问权限）")
         }
 
-        let r: ProcResult
-        if needAdmin || db == .system {
-            // ★ 写完必须在同一个提权脚本里重启 tccd（kickstart，不是 killall）
-            r = Sh.runAsAdmin(script: "#!/bin/sh\n/bin/cp -p \(TCCCore.shellQuote(db.path)) \(TCCCore.shellQuote(db.path)).bak-$(date +%Y%m%dT%H%M%SZ) 2>/dev/null\n/usr/bin/sqlite3 \(TCCCore.shellQuote(db.path)) <<'TCCSQL'\n\(sql)\nTCCSQL\n\(TCCCore.kickstartCmd)\nexit 0\n")
-        } else {
-            r = Sh.run("/usr/bin/sqlite3", [db.path, sql])
-        }
+        let r = TCCCore.apply(sql: sql, db: db, needAdmin: needAdmin)
         if r.status != 0 {
             res.failed = res.granted
             res.granted = 0
